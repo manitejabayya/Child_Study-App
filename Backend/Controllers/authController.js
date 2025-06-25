@@ -1,269 +1,9 @@
-// controllers/authController.js
-const crypto = require('crypto');
-const ErrorResponse = require('../utils/errorResponse');
-const asyncHandler = require('../middlewares/async');
+// Controllers/authController.js
 const User = require('../models/User');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
-// @desc    Register user
-// @route   POST /api/v1/auth/register
-// @access  Public
-exports.register = asyncHandler(async (req, res, next) => {
-  const { name, email, password, age, parentEmail } = req.body;
-
-  // Validate age for children
-  if (age && (age < 4 || age > 12)) {
-    return next(
-      new ErrorResponse('This app is designed for children aged 4-12 years old', 400)
-    );
-  }
-
-  // Create user
-  const user = await User.create({
-    name,
-    email,
-    password,
-    age,
-    parentEmail,
-    role: 'child'
-  });
-
-  sendTokenResponse(user, 201, res);
-});
-
-// @desc    Login user
-// @route   POST /api/v1/auth/login
-// @access  Public
-exports.login = asyncHandler(async (req, res, next) => {
-  const { email, password } = req.body;
-
-  // Validate email & password
-  if (!email || !password) {
-    return next(new ErrorResponse('Please provide an email and password', 400));
-  }
-
-  // Check for user
-  const user = await User.findOne({ email }).select('+password');
-
-  if (!user) {
-    return next(new ErrorResponse('Invalid credentials', 401));
-  }
-
-  // Check if account is locked
-  if (user.isLocked) {
-    return next(new ErrorResponse('Account temporarily locked due to too many failed login attempts', 423));
-  }
-
-  // Check password
-  const isMatch = await user.matchPassword(password);
-
-  if (!isMatch) {
-    // Handle failed login attempt
-    await user.incLoginAttempts();
-    return next(new ErrorResponse('Invalid credentials', 401));
-  }
-
-  // Reset login attempts on successful login
-  if (user.loginAttempts > 0) {
-    await user.resetLoginAttempts();
-  }
-
-  // Update streak and last active date
-  user.updateStreak();
-  await user.save();
-
-  sendTokenResponse(user, 200, res);
-});
-
-// @desc    Log user out / clear cookie
-// @route   GET /api/v1/auth/logout
-// @access  Private
-exports.logout = asyncHandler(async (req, res, next) => {
-  res.cookie('token', 'none', {
-    expires: new Date(Date.now() + 10 * 1000),
-    httpOnly: true,
-  });
-
-  res.status(200).json({
-    success: true,
-    data: {}
-  });
-});
-
-// @desc    Get current logged in user
-// @route   GET /api/v1/auth/me
-// @access  Private
-exports.getMe = asyncHandler(async (req, res, next) => {
-  const user = await User.findById(req.user.id).populate('achievements');
-
-  res.status(200).json({
-    success: true,
-    data: user
-  });
-});
-
-// @desc    Update user details
-// @route   PUT /api/v1/auth/updatedetails
-// @access  Private
-exports.updateDetails = asyncHandler(async (req, res, next) => {
-  const fieldsToUpdate = {
-    name: req.body.name,
-    email: req.body.email,
-    age: req.body.age,
-    parentEmail: req.body.parentEmail,
-    preferences: req.body.preferences
-  };
-
-  // Remove undefined fields
-  Object.keys(fieldsToUpdate).forEach(key => {
-    if (fieldsToUpdate[key] === undefined) {
-      delete fieldsToUpdate[key];
-    }
-  });
-
-  const user = await User.findByIdAndUpdate(req.user.id, fieldsToUpdate, {
-    new: true,
-    runValidators: true
-  });
-
-  res.status(200).json({
-    success: true,
-    data: user
-  });
-});
-
-// @desc    Update password
-// @route   PUT /api/v1/auth/updatepassword
-// @access  Private
-exports.updatePassword = asyncHandler(async (req, res, next) => {
-  const user = await User.findById(req.user.id).select('+password');
-
-  // Check current password
-  if (!(await user.matchPassword(req.body.currentPassword))) {
-    return next(new ErrorResponse('Password is incorrect', 401));
-  }
-
-  user.password = req.body.newPassword;
-  await user.save();
-
-  sendTokenResponse(user, 200, res);
-});
-
-// @desc    Forgot password
-// @route   POST /api/v1/auth/forgotpassword
-// @access  Public
-exports.forgotPassword = asyncHandler(async (req, res, next) => {
-  const user = await User.findOne({ email: req.body.email });
-
-  if (!user) {
-    return next(new ErrorResponse('There is no user with that email', 404));
-  }
-
-  // Get reset token
-  const resetToken = crypto.randomBytes(20).toString('hex');
-
-  // Hash token and set to resetPasswordToken field
-  user.resetPasswordToken = crypto
-    .createHash('sha256')
-    .update(resetToken)
-    .digest('hex');
-
-  // Set expire
-  user.resetPasswordExpire = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-  await user.save({ validateBeforeSave: false });
-
-  // Create reset url
-  const resetUrl = `${req.protocol}://${req.get('host')}/api/v1/auth/resetpassword/${resetToken}`;
-
-  const message = `You are receiving this email because you (or someone else) has requested the reset of a password. Please make a PUT request to: \n\n ${resetUrl}`;
-
-  try {
-    // Here you would send an email to the parent's email
-    // For now, we'll just return the reset token (NOT recommended for production)
-    res.status(200).json({
-      success: true,
-      message: 'Reset token sent to parent email',
-      resetToken: resetToken // Remove this in production
-    });
-  } catch (err) {
-    console.log(err);
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpire = undefined;
-
-    await user.save({ validateBeforeSave: false });
-
-    return next(new ErrorResponse('Email could not be sent', 500));
-  }
-});
-
-// @desc    Reset password
-// @route   PUT /api/v1/auth/resetpassword/:resettoken
-// @access  Public
-exports.resetPassword = asyncHandler(async (req, res, next) => {
-  // Get hashed token
-  const resetPasswordToken = crypto
-    .createHash('sha256')
-    .update(req.params.resettoken)
-    .digest('hex');
-
-  const user = await User.findOne({
-    resetPasswordToken,
-    resetPasswordExpire: { $gt: Date.now() }
-  });
-
-  if (!user) {
-    return next(new ErrorResponse('Invalid or expired reset token', 400));
-  }
-
-  // Set new password
-  user.password = req.body.password;
-  user.resetPasswordToken = undefined;
-  user.resetPasswordExpire = undefined;
-  await user.save();
-
-  sendTokenResponse(user, 200, res);
-});
-
-// @desc    Add achievement to user
-// @route   POST /api/v1/auth/achievement
-// @access  Private
-exports.addAchievement = asyncHandler(async (req, res, next) => {
-  const { name, description, icon, points } = req.body;
-
-  const user = await User.findById(req.user.id);
-
-  // Check if achievement already exists
-  const existingAchievement = user.achievements.find(ach => ach.name === name);
-  
-  if (existingAchievement) {
-    return next(new ErrorResponse('Achievement already earned', 400));
-  }
-
-  // Add achievement
-  user.achievements.push({
-    name,
-    description,
-    icon,
-    points,
-    earnedAt: Date.now()
-  });
-
-  // Add points
-  const leveledUp = user.addPoints(points);
-
-  await user.save();
-
-  res.status(200).json({
-    success: true,
-    data: {
-      user,
-      leveledUp,
-      achievement: user.achievements[user.achievements.length - 1]
-    }
-  });
-});
-
-// Get token from model, create cookie and send response
+// Helper function to send token response
 const sendTokenResponse = (user, statusCode, res) => {
   // Create token
   const token = user.getSignedJwtToken();
@@ -282,16 +22,349 @@ const sendTokenResponse = (user, statusCode, res) => {
   res.status(statusCode).cookie('token', token, options).json({
     success: true,
     token,
-    data: {
+    user: {
       id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
+      age: user.age,
       level: user.level,
       totalPoints: user.totalPoints,
       streakDays: user.streakDays,
-      avatar: user.avatar,
-      preferences: user.preferences
+      avatar: user.avatar
     }
   });
+};
+
+// @desc    Register user
+// @route   POST /api/v1/auth/register
+// @access  Public
+const register = async (req, res, next) => {
+  try {
+    const { name, email, password, age, parentEmail, role } = req.body;
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        error: 'User with this email already exists. Please use a different email or try logging in.'
+      });
+    }
+
+    // Create user
+    const user = await User.create({
+      name,
+      email: email.toLowerCase(),
+      password,
+      age,
+      parentEmail: parentEmail ? parentEmail.toLowerCase() : undefined,
+      role: role || 'child'
+    });
+
+    sendTokenResponse(user, 201, res);
+  } catch (error) {
+    console.error('Registration error:', error);
+    
+    // Handle MongoDB duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyValue)[0];
+      const value = error.keyValue[field];
+      
+      return res.status(400).json({
+        success: false,
+        error: `${field.charAt(0).toUpperCase() + field.slice(1)} '${value}' is already registered. Please use a different ${field} or try logging in.`
+      });
+    }
+    
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      const message = Object.values(error.errors).map(val => val.message).join(', ');
+      return res.status(400).json({
+        success: false,
+        error: message
+      });
+    }
+    
+    // Handle other errors
+    res.status(500).json({
+      success: false,
+      error: 'Server error during registration. Please try again.'
+    });
+  }
+};
+
+// @desc    Login user
+// @route   POST /api/v1/auth/login
+// @access  Public
+const login = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validate email & password
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please provide an email and password'
+      });
+    }
+
+    // Check for user
+    const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid credentials'
+      });
+    }
+
+    // Check if account is locked
+    if (user.isLocked) {
+      return res.status(423).json({
+        success: false,
+        error: 'Account is locked due to too many failed login attempts. Please try again later.'
+      });
+    }
+
+    // Check if password matches
+    const isMatch = await user.matchPassword(password);
+
+    if (!isMatch) {
+      // Increment login attempts
+      await user.incLoginAttempts();
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid credentials'
+      });
+    }
+
+    // Reset login attempts on successful login
+    if (user.loginAttempts > 0) {
+      await user.resetLoginAttempts();
+    }
+
+    // Update streak
+    user.updateStreak();
+    await user.save();
+
+    sendTokenResponse(user, 200, res);
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error during login. Please try again.'
+    });
+  }
+};
+
+// @desc    Get current logged in user
+// @route   GET /api/v1/auth/me
+// @access  Private
+const getMe = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+
+    res.status(200).json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    console.error('Get me error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error. Please try again.'
+    });
+  }
+};
+
+// @desc    Logout user / clear cookie
+// @route   GET /api/v1/auth/logout
+// @access  Private
+const logout = (req, res, next) => {
+  res.cookie('token', 'none', {
+    expires: new Date(Date.now() + 10 * 1000),
+    httpOnly: true
+  });
+
+  res.status(200).json({
+    success: true,
+    data: {}
+  });
+};
+
+// @desc    Update user details
+// @route   PUT /api/v1/auth/updatedetails
+// @access  Private
+const updateDetails = async (req, res, next) => {
+  try {
+    const fieldsToUpdate = {
+      name: req.body.name,
+      email: req.body.email
+    };
+
+    const user = await User.findByIdAndUpdate(req.user.id, fieldsToUpdate, {
+      new: true,
+      runValidators: true
+    });
+
+    res.status(200).json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    console.error('Update details error:', error);
+    
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email already exists. Please use a different email.'
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: 'Server error. Please try again.'
+    });
+  }
+};
+
+// @desc    Update password
+// @route   PUT /api/v1/auth/updatepassword
+// @access  Private
+const updatePassword = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select('+password');
+
+    // Check current password
+    if (!(await user.matchPassword(req.body.currentPassword))) {
+      return res.status(401).json({
+        success: false,
+        error: 'Password is incorrect'
+      });
+    }
+
+    user.password = req.body.newPassword;
+    await user.save();
+
+    sendTokenResponse(user, 200, res);
+  } catch (error) {
+    console.error('Update password error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error. Please try again.'
+    });
+  }
+};
+
+// @desc    Forgot password
+// @route   POST /api/v1/auth/forgotpassword
+// @access  Public
+const forgotPassword = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ email: req.body.email });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'There is no user with that email'
+      });
+    }
+
+    // For now, just return a success message
+    // In production, you would send an email with reset token
+    res.status(200).json({
+      success: true,
+      data: 'Password reset functionality will be implemented soon'
+    });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error. Please try again.'
+    });
+  }
+};
+
+// @desc    Reset password
+// @route   PUT /api/v1/auth/resetpassword/:resettoken
+// @access  Public
+const resetPassword = async (req, res, next) => {
+  try {
+    // This is a placeholder - implement actual reset logic
+    res.status(200).json({
+      success: true,
+      data: 'Password reset functionality will be implemented soon'
+    });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error. Please try again.'
+    });
+  }
+};
+
+// @desc    Add achievement
+// @route   POST /api/v1/auth/achievement
+// @access  Private
+const addAchievement = async (req, res, next) => {
+  try {
+    const { name, description, icon, points } = req.body;
+    
+    const user = await User.findById(req.user.id);
+    
+    // Check if achievement already exists
+    const existingAchievement = user.achievements.find(
+      achievement => achievement.name === name
+    );
+    
+    if (existingAchievement) {
+      return res.status(400).json({
+        success: false,
+        error: 'Achievement already earned'
+      });
+    }
+    
+    // Add achievement
+    user.achievements.push({
+      name,
+      description,
+      icon,
+      points: points || 0
+    });
+    
+    // Add points
+    const leveledUp = user.addPoints(points || 0);
+    
+    await user.save();
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        achievement: user.achievements[user.achievements.length - 1],
+        leveledUp,
+        newLevel: user.level,
+        totalPoints: user.totalPoints
+      }
+    });
+  } catch (error) {
+    console.error('Add achievement error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error. Please try again.'
+    });
+  }
+};
+
+module.exports = {
+  register,
+  login,
+  getMe,
+  logout,
+  updateDetails,
+  updatePassword,
+  forgotPassword,
+  resetPassword,
+  addAchievement
 };

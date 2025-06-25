@@ -5,13 +5,20 @@ const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const path = require('path');
 
+// 1. FIRST THING - Load environment variables with correct path
+dotenv.config({ path: path.join(__dirname, 'config/config.env') }); // Fixed path
+
+// DEBUG: Verify environment variables
+console.log('JWT_SECRET:', process.env.JWT_SECRET || 'NOT FOUND!');
+console.log('MONGODB_URI:', process.env.MONGODB_URI ? 'Found' : 'Not found');
+
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 
 // Import middlewares
 const { protect } = require('./middlewares/auth');
-const { errorHandler, notFound } = require('./middlewares/error'); // Fixed: destructure errorHandler
+const { errorHandler, notFound } = require('./middlewares/error');
 
 // Load environment variables
 dotenv.config();
@@ -43,9 +50,9 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/users', protect, userRoutes);
+// API Routes - FIXED: Added /v1 prefix to match your frontend requests
+app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/users', protect, userRoutes);
 
 // Welcome route
 app.get('/', (req, res) => {
@@ -54,8 +61,8 @@ app.get('/', (req, res) => {
     description: 'A fun learning platform for kids to explore Computer Science basics',
     version: '1.0.0',
     endpoints: {
-      auth: '/api/auth',
-      users: '/api/users',
+      auth: '/api/v1/auth',
+      users: '/api/v1/users',
       health: '/health'
     }
   });
@@ -70,18 +77,32 @@ app.use(errorHandler);
 // Database connection
 const connectDB = async () => {
   try {
-    // Temporary hardcoded connection string for testing
-    const mongoURI = process.env.MONGODB_URI || 'mongodb+srv://pandubayya369:Maniteja%402005@cluster0.3k5xadv.mongodb.net/child-study-app';
-    console.log('Attempting to connect to:', mongoURI.includes('cluster0') ? 'MongoDB Atlas' : 'localhost');
+    const mongoURI = process.env.MONGODB_URI;
+    console.log('Connecting to:', mongoURI);
+
+    const conn = await mongoose.connect(mongoURI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      retryWrites: true,
+      w: 'majority'
+    });
+
+    // Verify database exists or create it
+    const adminDb = conn.connection.db.admin();
+    const dbList = await adminDb.listDatabases();
+    const dbExists = dbList.databases.some(db => db.name === 'child-study-app');
     
-    const conn = await mongoose.connect(mongoURI);
-    console.log(` MongoDB Connected: ${conn.connection.host}`);
+    console.log(dbExists ? '✅ Database exists' : '⚠️ Database will be created on first write');
+    
+    // Force collection creation
+    await conn.connection.db.collection('users').createIndex({ email: 1 }, { unique: true });
+    console.log('✔️ Users collection ready');
+    
   } catch (error) {
-    console.error(' Database connection failed:', error.message);
+    console.error('❌ Database connection failed:', error.message);
     process.exit(1);
   }
 };
-
 // Connect to database
 connectDB();
 
