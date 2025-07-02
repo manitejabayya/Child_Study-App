@@ -26,6 +26,13 @@ router
   .get(authorize('admin'), getUsers)
   .post(authorize('admin'), createUser);
 
+// Add the missing progress route (for current user without /me prefix)
+router.get('/progress', getUserProgress);
+router.get('/achievements', getUserAchievements);
+router.get('/bookmarks', getUserBookmarks);
+router.get('/stats', getUserStats);
+router.put('/avatar', updateAvatar);
+
 router
   .route('/:id')
   .get(authorize('admin'), getUser)
